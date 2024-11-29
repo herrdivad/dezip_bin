@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -11,8 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/diskfs/go-diskfs"            // MIT License: Copyright (c) 2017 Avi Deitcher
-	"github.com/diskfs/go-diskfs/filesystem" // MIT License Copyright: (c) 2017 Avi Deitcher
+	//"github.com/herrdivad/go-diskfs"
+	//"github.com/herrdivad/go-diskfs/filesystem"
+	"github.com/diskfs/go-diskfs"
+	"github.com/diskfs/go-diskfs/filesystem"
 )
 
 /**************************************************************************
@@ -51,7 +55,7 @@ import (
  * -----------------------------------------------------------------------
  */
 
-var targetDir string = "./target/" // Update this path to your target (output) directory
+var targetDir string = "./target2/" // Update this path to your target (output) directory
 var currentPath = "/"
 
 func main() {
@@ -94,6 +98,19 @@ func main() {
 	// This should list everything
 	files := readPath(mainFS, currentPath)
 
+	/*
+		err = mainFS.RemoveFile("/DHM20241004.pdf")
+		if err != nil {
+			log.Panic(err)
+		}
+
+
+		fmt.Println("\n After remove test \n")
+
+		files = readPath(mainFS, currentPath)
+
+	*/
+
 	// Going deeper into device results folder
 	if len(os.Args) > 1 {
 		currentPath = "/" + device + "/results" // remove or rename "results" if you are not targeting this kind of folders
@@ -117,38 +134,68 @@ func main() {
 		fmt.Printf("%s - %v time\n", file.Name(), file.ModTime())
 	}
 
+	shouldReturn := loopThroughFilesToExtract(files, mainFS)
+	if shouldReturn {
+		fmt.Println("ERROR during Loop through Files")
+		return
+	}
+
+	fmt.Println("EOC reached")
+
+}
+
+func loopThroughFilesToExtract(files []fs.FileInfo, myFS filesystem.FileSystem) bool {
+
+	rangeArgument := "--latest"
+	if len(os.Args) > 2 {
+		rangeArgument = os.Args[2]
+	}
+
 	for i, file := range files {
 
 		fileName := file.Name()
 
 		if i == 0 {
 
-			if !readAndExtractFile(fileName, mainFS) {
+			if !readAndExtractFile(fileName, myFS, true) {
 				fmt.Println("Operation failed")
-				return
+				return true
 			}
 
 			fmt.Println("Operation succeeded")
 		}
 		if i > 0 {
 
-			fmt.Println("Looking for more files with same name but different extension ...")
+			switch rangeArgument {
+			case "--latest":
+				return false
+			case "--latestSame":
+				fmt.Println("Looking for more files with same name but different extension ...")
 
-			if fileNameWithoutExt(fileName) != fileNameWithoutExt(files[0].Name()) {
-				fmt.Println("No more files with same name")
-				break
+				if fileNameWithoutExt(fileName) != fileNameWithoutExt(files[0].Name()) {
+					fmt.Println("No more files with same name")
+					return false
 
-			} else {
-				if !readAndExtractFile(fileName, mainFS) {
-					fmt.Println("Operation failed")
-					return
+				} else {
+					if !readAndExtractFile(fileName, myFS, true) {
+						fmt.Println("Operation failed")
+						return true
+					}
 				}
+			case "--all":
+				if !readAndExtractFile(fileName, myFS) {
+					fmt.Println("Operation failed")
+					return true
+				}
+
+				fmt.Println("Operation succeeded")
+			default:
+				panic("Unexpected case: this should not happen \n Please only use this cases for the 2nd argument --latest, --latestSame, --all")
 			}
+
 		}
 	}
-
-	fmt.Println("EOC reached")
-
+	return false
 }
 
 func readPath(myFS filesystem.FileSystem, mypath string) []fs.FileInfo {
@@ -177,7 +224,7 @@ func readPath(myFS filesystem.FileSystem, mypath string) []fs.FileInfo {
 	return fileList
 }
 
-func readAndExtractFile(fileName string, myFS filesystem.FileSystem) bool {
+func readAndExtractFile(fileName string, myFS filesystem.FileSystem, check ...bool) bool {
 	fmt.Printf("The latest file is %s \n", fileName)
 
 	// Construct the absolute path using the correct separator for your operating system
@@ -193,8 +240,41 @@ func readAndExtractFile(fileName string, myFS filesystem.FileSystem) bool {
 
 	defer fileEntry.Close()
 
-	// Create the target file in the target directory
 	outputPath := filepath.Join(targetDir, fileName)
+
+	// TODO: Check if file already exists in TargetDir
+	// Default value for check is false
+	shouldCheckCS := false
+	if len(check) > 0 {
+		shouldCheckCS = check[0]
+	}
+
+	// Process logic based on `shouldCheck`
+	if shouldCheckCS {
+		var cs [2]string
+		cs[0], err = getChecksum(fileEntry)
+		if err != nil {
+			fmt.Printf("Error getting CheckSum of file from bin-file: %v\n", err)
+			return false
+		}
+
+		if fileExists(outputPath) {
+			cs[1], err = getChecksum(outputPath)
+			if err != nil {
+				fmt.Printf("Error getting CheckSum of file from bin-file in target Dir: %v\n", err)
+				return false
+			}
+		}
+
+		fmt.Println("The CheckSum of both files are", cs)
+
+		if cs[0] == cs[1] { // if the checksum of source and target file is identical, file should not be extracted and will be skipped
+			fmt.Printf("Skipping extraction of %s to %s because the files have the same CheckSum\n", fileName, outputPath)
+			return true
+		}
+	}
+
+	// Create the target file in the target directory
 	outputFile, err := os.Create(outputPath)
 	if err != nil {
 		fmt.Printf("Error creating output file: %v\n", err)
@@ -203,6 +283,12 @@ func readAndExtractFile(fileName string, myFS filesystem.FileSystem) bool {
 	defer outputFile.Close()
 
 	// Copy the file contents to the target file
+	fmt.Println("Trying to copy content...")
+	_, err = fileEntry.Seek(0, io.SeekStart) // Go to start of file (if CheckSum Calculater reached already EOF)
+	if err != nil {
+		fmt.Printf("Error resetting file pointer: %v\n", err)
+		return false
+	}
 	_, err = io.Copy(outputFile, fileEntry)
 	if err != nil {
 		fmt.Printf("Error copying file contents: %v\n", err)
@@ -215,4 +301,47 @@ func readAndExtractFile(fileName string, myFS filesystem.FileSystem) bool {
 
 func fileNameWithoutExt(fileName string) string {
 	return strings.TrimSuffix(fileName, filepath.Ext(fileName))
+}
+
+func fileExists(filePath string) bool {
+	_, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
+		return false // File does not exist
+	}
+	return err == nil // Returns true if file exists, false if there's another error
+}
+
+// getChecksum computes the SHA256 checksum for a file.
+// It can work with both filesystem.File and regular files from a path.
+func getChecksum(fileOrPath interface{}) (string, error) {
+	var file io.Reader
+
+	// Determine if we're dealing with a filesystem.File or a regular file from a path
+	switch v := fileOrPath.(type) {
+	case filesystem.File:
+		// If it's a filesystem.File, use it directly
+		file = v
+	case string:
+		// If it's a string (a file path), open the file
+		f, err := os.Open(v)
+		if err != nil {
+			return "", fmt.Errorf("failed to open file from path: %v", err)
+		}
+		defer f.Close()
+		file = f
+	default:
+		return "", fmt.Errorf("invalid type, must be filesystem.File or string (file path)")
+	}
+	// Create a new SHA256 hash object
+	hash := sha256.New()
+
+	// Copy the file's content into the hash object
+	_, err := io.Copy(hash, file)
+	if err != nil {
+		return "", fmt.Errorf("failed to compute checksum: %v", err)
+	}
+
+	// Compute the hash and return it as a hexadecimal string
+	checksum := hex.EncodeToString(hash.Sum(nil))
+	return checksum, nil
 }
