@@ -15,8 +15,8 @@ import (
 
 	//"github.com/herrdivad/go-diskfs"
 	//"github.com/herrdivad/go-diskfs/filesystem"
-	"github.com/diskfs/go-diskfs"
-	"github.com/diskfs/go-diskfs/filesystem"
+	"github.com/diskfs/go-diskfs"            // MIT License: Copyright (c) 2017 Avi Deitcher
+	"github.com/diskfs/go-diskfs/filesystem" // MIT License: Copyright (c) 2017 Avi Deitcher
 )
 
 /**************************************************************************

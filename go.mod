@@ -8,7 +8,6 @@ require (
 	github.com/djherbis/times v1.6.0 // indirect
 	github.com/elliotwutingfeng/asciiset v0.0.0-20240214025120-24af97c84155 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/herrdivad/go-diskfs v1.5.0
 	github.com/klauspost/compress v1.17.11 // indirect
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect
 	github.com/pkg/xattr v0.4.10 // indirect
