@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,8 +56,18 @@ import (
  * -----------------------------------------------------------------------
  */
 
-var targetDir string = "./target2/" // Update this path to your target (output) directory
+var targetDir string = "./target/" // Update this path to your target (output) directory
 var currentPath = "/"
+
+type FileWithPath struct {
+	ItsFileInfo fs.FileInfo
+	ItsPath     string
+}
+
+type FSFileWithPath struct {
+	FileSystem filesystem.FileSystem
+	FilePath   string
+}
 
 func main() {
 	// Path to the FAT32 image and target directory
@@ -96,7 +107,7 @@ func main() {
 
 	// List files in the root directory
 	// This should list everything
-	files := readPath(mainFS, currentPath)
+	files := readPath(mainFS, currentPath, false)
 
 	/*
 		err = mainFS.RemoveFile("/DHM20241004.pdf")
@@ -113,25 +124,30 @@ func main() {
 
 	// Going deeper into device results folder
 	if len(os.Args) > 1 {
-		currentPath = "/" + device + "/results" // remove or rename "results" if you are not targeting this kind of folders
-		files = readPath(mainFS, currentPath)
+		if device == "all" || device == "--all" || device == "-all" || device == "-a" || device == "each" {
+			files = readPath(mainFS, currentPath, true)
+		} else {
+			currentPath = "/" + device + "/results" // remove or rename "results" if you are not targeting this kind of folders
+			files = readPath(mainFS, currentPath, false)
+		}
+
 	}
 
 	sort.Slice(files, func(i, j int) bool {
 		// Always place "System Volume Information" last
-		if files[i].Name() == "System Volume Information" {
+		if files[i].ItsFileInfo.Name() == "System Volume Information" {
 			return false
 		}
-		if files[j].Name() == "System Volume Information" {
+		if files[j].ItsFileInfo.Name() == "System Volume Information" {
 			return true
 		}
 		// Sort by modification time for other files (newest first)
-		return files[i].ModTime().After(files[j].ModTime())
+		return files[i].ItsFileInfo.ModTime().After(files[j].ItsFileInfo.ModTime())
 	})
 
 	fmt.Println(currentPath, "directory contents sorted by Modtime:")
 	for _, file := range files {
-		fmt.Printf("%s - %v time\n", file.Name(), file.ModTime())
+		fmt.Printf("%s: %s - %v time\n", file.ItsPath, file.ItsFileInfo.Name(), file.ItsFileInfo.ModTime())
 	}
 
 	shouldReturn := loopThroughFilesToExtract(files, mainFS)
@@ -140,11 +156,18 @@ func main() {
 		return
 	}
 
+	FileToRemove := FSFileWithPath{
+		FileSystem: mainFS,
+		FilePath:   "/my-go-project",
+	}
+	fmt.Println(tidyUp(FileToRemove))
+	fmt.Println(tidyUp(targetDir + "uvvis_measurement.txt"))
+
 	fmt.Println("EOC reached")
 
 }
 
-func loopThroughFilesToExtract(files []fs.FileInfo, myFS filesystem.FileSystem) bool {
+func loopThroughFilesToExtract(files []FileWithPath, myFS filesystem.FileSystem) bool {
 
 	rangeArgument := "--latest"
 	if len(os.Args) > 2 {
@@ -153,11 +176,11 @@ func loopThroughFilesToExtract(files []fs.FileInfo, myFS filesystem.FileSystem) 
 
 	for i, file := range files {
 
-		fileName := file.Name()
+		fileName := file.ItsFileInfo.Name()
 
 		if i == 0 {
 
-			if !readAndExtractFile(fileName, myFS, true) {
+			if !readAndExtractFile(file, myFS, true) {
 				fmt.Println("Operation failed")
 				return true
 			}
@@ -172,18 +195,18 @@ func loopThroughFilesToExtract(files []fs.FileInfo, myFS filesystem.FileSystem) 
 			case "--latestSame":
 				fmt.Println("Looking for more files with same name but different extension ...")
 
-				if fileNameWithoutExt(fileName) != fileNameWithoutExt(files[0].Name()) {
+				if fileNameWithoutExt(fileName) != fileNameWithoutExt(files[0].ItsFileInfo.Name()) {
 					fmt.Println("No more files with same name")
 					return false
 
 				} else {
-					if !readAndExtractFile(fileName, myFS, true) {
+					if !readAndExtractFile(file, myFS, true) {
 						fmt.Println("Operation failed")
 						return true
 					}
 				}
 			case "--all":
-				if !readAndExtractFile(fileName, myFS) {
+				if !readAndExtractFile(file, myFS, true) {
 					fmt.Println("Operation failed")
 					return true
 				}
@@ -194,11 +217,22 @@ func loopThroughFilesToExtract(files []fs.FileInfo, myFS filesystem.FileSystem) 
 			}
 
 		}
+		var shouldTidyUp bool
+		if len(os.Args) > 3 {
+			shouldTidyUp, _ = strconv.ParseBool(os.Args[3])
+		}
+		if shouldTidyUp {
+			FileToRemove := FSFileWithPath{
+				FileSystem: myFS,
+				FilePath:   file.ItsPath + "/" + fileName,
+			}
+			fmt.Println("I tried to delet", FileToRemove.FilePath, "The result is: ", tidyUp(FileToRemove))
+		}
 	}
 	return false
 }
 
-func readPath(myFS filesystem.FileSystem, mypath string) []fs.FileInfo {
+func readPath(myFS filesystem.FileSystem, mypath string, recursive bool) []FileWithPath {
 
 	fmt.Println(
 		mypath, "directory contents (only Files are further used,  \n to search result folders of an instrument, please use CLI-Arguments like SMP50):")
@@ -208,41 +242,56 @@ func readPath(myFS filesystem.FileSystem, mypath string) []fs.FileInfo {
 		log.Panic(err)
 	}
 
-	// Slice to store only the files (not directories)
-	var fileList []fs.FileInfo
+	var fileList []FileWithPath
 
 	for _, file := range files {
-		// Skip directories
-		if !(file.IsDir()) {
-			// Add only files to the list
-			fileList = append(fileList, file)
+		if file.Name() == "." || file.Name() == ".." || file.Name() == "System Volume Information" || file.Name() == "LOST.DIR" {
+			continue
 		}
-
-		// Print file details
-		fmt.Printf("%s - %d bytes\n", file.Name(), file.Size())
+		if file.IsDir() {
+			// If recursive is enabled, scan subdirectory
+			if recursive {
+				fmt.Println("Going recursive...")
+				newPath := mypath + "/" + file.Name()
+				fmt.Printf("Reaching %s ...\n", newPath)
+				subDirFiles := readPath(myFS, newPath, true) // Recursive call
+				fileList = append(fileList, subDirFiles...)  // Merge results
+			}
+		} else {
+			// Add file to the list
+			fileList = append(fileList, FileWithPath{ItsFileInfo: file, ItsPath: mypath})
+		}
 	}
+
+	// Print file details
+	for _, file := range fileList {
+		fmt.Printf("%s - %d bytes in path %s\n", file.ItsFileInfo.Name(), file.ItsFileInfo.Size(), file.ItsPath)
+	}
+
 	return fileList
 }
 
-func readAndExtractFile(fileName string, myFS filesystem.FileSystem, check ...bool) bool {
+func readAndExtractFile(file FileWithPath, myFS filesystem.FileSystem, check ...bool) bool {
+	fileName := file.ItsFileInfo.Name()
 	fmt.Printf("The latest file is %s \n", fileName)
 
 	// Construct the absolute path using the correct separator for your operating system
-	absolutePath := currentPath + "/" + string(fileName) // -> filepath.Join("/", fileName) will !not! work, maybe Windows or FAT32 !!!!!!!!
+	// absolutePath := currentPath + "/" + string(fileName) // -> filepath.Join("/", fileName) will !not! work, maybe Windows or FAT32 !!!!!!!!
+	absolutePath := file.ItsPath + "/" + string(fileName)
 	fmt.Printf("The absolute path is %s \n", absolutePath)
 
 	// Attempt to open the file using the absolute path
 	fileEntry, err := myFS.OpenFile(string(absolutePath), 0) // Use absolute path
 	if err != nil {
+		fmt.Println("Hier sollte ich aussteigen...")
 		fmt.Printf("Error opening file %s: %v\n", absolutePath, err)
 		return false
 	}
 
 	defer fileEntry.Close()
 
-	outputPath := filepath.Join(targetDir, fileName)
+	outputPath := filepath.Join(targetDir, file.ItsPath, fileName)
 
-	// TODO: Check if file already exists in TargetDir
 	// Default value for check is false
 	shouldCheckCS := false
 	if len(check) > 0 {
@@ -274,6 +323,11 @@ func readAndExtractFile(fileName string, myFS filesystem.FileSystem, check ...bo
 		}
 	}
 
+	// Ensure the directory path exists before creating the file
+	if err := os.MkdirAll(filepath.Dir(outputPath), os.ModePerm); err != nil {
+		fmt.Printf("Error creating directory: %v\n", err)
+		return false
+	}
 	// Create the target file in the target directory
 	outputFile, err := os.Create(outputPath)
 	if err != nil {
@@ -333,7 +387,7 @@ func getChecksum(fileOrPath interface{}) (string, error) {
 		return "", fmt.Errorf("invalid type, must be filesystem.File or string (file path)")
 	}
 	// Create a new SHA256 hash object
-	hash := sha256.New()
+	hash := sha256.New() // hash is just an object which cannot be read or transformed by normal means. You need to use the hash.Sum(nil)-func!!!
 
 	// Copy the file's content into the hash object
 	_, err := io.Copy(hash, file)
@@ -342,6 +396,25 @@ func getChecksum(fileOrPath interface{}) (string, error) {
 	}
 
 	// Compute the hash and return it as a hexadecimal string
-	checksum := hex.EncodeToString(hash.Sum(nil))
+	checksum := hex.EncodeToString(hash.Sum(nil)) // nil means raw hash without any prefix. A prefix is normally not needed.
 	return checksum, nil
+}
+
+// Removes a file from OS or from a FSFileWithPath struct
+// The interface type must be a FSFileWithPath or a string
+func tidyUp(osFileOrFSFile interface{}) error {
+
+	// var file io.Reader
+
+	// Determine if we're dealing with a filesystem.File or a regular file from a path
+	switch v := osFileOrFSFile.(type) {
+	case FSFileWithPath:
+		fs := v.FileSystem
+		filePath := v.FilePath
+		return fs.Remove(filePath)
+	case string:
+		return os.Remove(v)
+	default:
+		return fmt.Errorf("invalid type, must be FSFileWithPath or string (file path)")
+	}
 }
